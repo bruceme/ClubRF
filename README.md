@@ -1,4 +1,4 @@
-# ClubRF &nbsp;&nbsp;&nbsp;&nbsp;&nbsp; [![Join the chat at https://gitter.im/ClubRF/community](https://badges.gitter.im/Join%20Chat.svg)](https://gitter.im/ClubRF/community?utm_source=badge&utm_medium=badge&utm_campaign=pr-badge&utm_content=badge)
+# ClubRF &nbsp;&nbsp;&nbsp;&nbsp;&nbsp; [![Join the chat convo!](https://badges.gitter.im/Join%20Chat.svg)](https://gitter.im/ClubRF/community?utm_source=badge&utm_medium=badge&utm_campaign=pr-badge&utm_content=badge)
 
 Sailplane club oriented DIY proximity awareness system.
 
@@ -6,8 +6,6 @@ Features:
 * Community based open-source.  I'll approve any reasonable request that forwards the functionality of a club-oriented device.
 * 2-way raw data bridge between 868/915 MHz radio band and Bluetooth / Wi-Fi 
 * All focus is on a standalone, battery powered, compatible proximity awareness device for club-environments
-
-# Compatibility <sup>1</sup>
 
 # Protocol Supported
 
