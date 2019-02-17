@@ -3,7 +3,7 @@
 Sailplane club oriented DIY proximity awareness system.
 
 Features:
-* Community based open-source.  I'll approve any reasonable request that forwards the functionality of a club-oriented device.
+* Community based open-source. Pull requests friendly
 * 2-way raw data bridge between 868/915 MHz radio band and Bluetooth / Wi-Fi 
 * All focus is on a standalone, battery powered, compatible proximity awareness device for club-environments
 
