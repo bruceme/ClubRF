@@ -1,4 +1,4 @@
-# ClubRF &nbsp;&nbsp;&nbsp;&nbsp;&nbsp; [![Join the chat at https://gitter.im/ClubRF/community](https://badges.gitter.im/Join%20Chat.svg)](https://gitter.im/ClubRF/community?utm_source=badge&utm_medium=badge&utm_campaign=pr-badge&utm_content=badge)]
+# ClubRF &nbsp;&nbsp;&nbsp;&nbsp;&nbsp; [![Join the chat at https://gitter.im/ClubRF/community](https://badges.gitter.im/Join%20Chat.svg)](https://gitter.im/ClubRF/community?utm_source=badge&utm_medium=badge&utm_campaign=pr-badge&utm_content=badge)
 
 Sailplane club oriented DIY proximity awareness system.
 
