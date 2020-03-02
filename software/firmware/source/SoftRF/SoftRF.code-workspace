@@ -1,0 +1,32 @@
+{
+	"folders": [
+		{
+			"path": "."
+		},
+		{
+			"path": "C:\\Users\\Bruce\\Documents\\Arduino\\libraries"
+		},
+		{
+			"path": "C:\\Users\\Bruce\\Documents\\PlatformIO\\Projects\\190218-172630-esp32dev",
+			"name": "190218-172630-esp32dev"
+		},
+		{
+			"path": "C:\\Users\\Bruce\\Documents\\PlatformIO\\Projects\\190218-190604-esp32dev",
+			"name": "190218-190604-esp32dev"
+		}
+	],
+	"settings": {
+		"files.associations": {
+			"ios": "cpp",
+			"xiosbase": "cpp",
+			"memory": "cpp",
+			"initializer_list": "cpp",
+			"list": "cpp",
+			"type_traits": "cpp",
+			"vector": "cpp",
+			"xhash": "cpp",
+			"xstring": "cpp",
+			"xutility": "cpp"
+		}
+	}
+}

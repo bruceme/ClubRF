@@ -23,6 +23,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include "C:\Users\Bruce\.platformio\packages\framework-arduinoespressif32\tools\sdk\include\newlib\time.h"
 
 NmeaSignal nmeaInfoModeToSignal(char mode) {
   switch (mode) {
