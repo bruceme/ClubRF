@@ -2,7 +2,7 @@
  *
  * Protocol_UAT978.cpp
  * Decoder for UAT 978 MHz ADS-B radio protocol
- * Copyright (C) 2019 Linar Yusupov
+ * Copyright (C) 2019-2020 Linar Yusupov
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -85,6 +85,9 @@ bool uat978_decode(void *pkt, ufo_t *this_aircraft, ufo_t *fop) {
   fop->ns[2] = 0; fop->ns[3] = 0;
   fop->ew[0] = 0; fop->ew[1] = 0;
   fop->ew[2] = 0; fop->ew[3] = 0;
+
+  /* sizeof(mdb.callsign) = 9 ; sizeof(fop->callsign) = 8 */
+  memcpy(fop->callsign, mdb.callsign, sizeof(fop->callsign));
 
   return true;
 }

@@ -1,6 +1,6 @@
 /*
  * WebHelper.cpp
- * Copyright (C) 2016-2019 Linar Yusupov
+ * Copyright (C) 2016-2020 Linar Yusupov
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -93,12 +93,13 @@ static const char about_html[] PROGMEM = "<html>\
 <tr><th align=left>Timur Sinitsyn, Tobias Simon, Ferry Huberts</th><td align=left>NMEA library</td></tr>\
 <tr><th align=left>yangbinbin (yangbinbin_ytu@163.com)</th><td align=left>ADS-B encoder C++ library</td></tr>\
 <tr><th align=left>Hristo Gochkov</th><td align=left>Arduino core for ESP32</td></tr>\
+<tr><th align=left>Evandro Copercini</th><td align=left>ESP32 BT SPP library</td></tr>\
 <tr><th align=left>Limor Fried and Ladyada</th><td align=left>Adafruit BMP085 library</td></tr>\
 <tr><th align=left>Kevin Townsend</th><td align=left>Adafruit BMP280 library</td></tr>\
 <tr><th align=left>Limor Fried and Kevin Townsend</th><td align=left>Adafruit MPL3115A2 library</td></tr>\
 <tr><th align=left>Oliver Kraus</th><td align=left>U8g2 LCD, OLED and eInk library</td></tr>\
 <tr><th align=left>Michael Miller</th><td align=left>NeoPixelBus library</td></tr>\
-<tr><th align=left>Shenzhen Xin Yuan (LilyGO) ET company</th><td align=left>TTGO T-Beam board</td></tr>\
+<tr><th align=left>Shenzhen Xin Yuan (LilyGO) ET company</th><td align=left>TTGO T-Beam and T-Watch</td></tr>\
 <tr><th align=left>JS Foundation</th><td align=left>jQuery library</td></tr>\
 <tr><th align=left>XCSoar team</th><td align=left>EGM96 data</td></tr>\
 <tr><th align=left>Mike McCauley</th><td align=left>BCM2835 C library</td></tr>\
@@ -108,15 +109,17 @@ static const char about_html[] PROGMEM = "<html>\
 <tr><th align=left>Robert Wessels and Tony Cave</th><td align=left>EasyLink library</td></tr>\
 <tr><th align=left>Oliver Jowett</th><td align=left>Dump978 library</td></tr>\
 <tr><th align=left>Phil Karn</th><td align=left>FEC library</td></tr>\
+<tr><th align=left>Lewis He</th><td align=left>AXP20X library</td></tr>\
+<tr><th align=left>Bodmer</th><td align=left>TFT library</td></tr>\
 </table>\
 <hr>\
-Copyright (C) 2015-2019 &nbsp;&nbsp;&nbsp; Linar Yusupov\
+Copyright (C) 2015-2020 &nbsp;&nbsp;&nbsp; Linar Yusupov\
 </body>\
 </html>";
 
 void handleSettings() {
 
-  size_t size = 4600;
+  size_t size = 4700;
   char *offset;
   size_t len = 0;
   char *Settings_temp = (char *) malloc(size);
@@ -201,7 +204,8 @@ void handleSettings() {
 </tr>"),
     (settings->rf_protocol == RF_PROTOCOL_LEGACY   ? legacy_proto_desc.name :
     (settings->rf_protocol == RF_PROTOCOL_ADSB_UAT ? uat978_proto_desc.name :
-     "UNK"))
+    (settings->rf_protocol == RF_PROTOCOL_FANET    ? fanet_proto_desc.name  :
+     "UNK")))
     );
   }
   len = strlen(offset);
@@ -239,6 +243,7 @@ void handleSettings() {
 <option %s value='%d'>Hangglider</option>\
 <option %s value='%d'>Paraglider</option>\
 <option %s value='%d'>Balloon</option>\
+<option %s value='%d'>Static</option>\
 </select>\
 </td>\
 </tr>\
@@ -299,6 +304,7 @@ void handleSettings() {
   (settings->aircraft_type == AIRCRAFT_TYPE_HANGGLIDER ? "selected" : ""),  AIRCRAFT_TYPE_HANGGLIDER,
   (settings->aircraft_type == AIRCRAFT_TYPE_PARAGLIDER ? "selected" : ""),  AIRCRAFT_TYPE_PARAGLIDER,
   (settings->aircraft_type == AIRCRAFT_TYPE_BALLOON ? "selected" : ""),  AIRCRAFT_TYPE_BALLOON,
+  (settings->aircraft_type == AIRCRAFT_TYPE_STATIC ? "selected" : ""),  AIRCRAFT_TYPE_STATIC,
   (settings->alarm == TRAFFIC_ALARM_NONE ? "selected" : ""),  TRAFFIC_ALARM_NONE,
   (settings->alarm == TRAFFIC_ALARM_DISTANCE ? "selected" : ""),  TRAFFIC_ALARM_DISTANCE,
   (settings->alarm == TRAFFIC_ALARM_VECTOR ? "selected" : ""),  TRAFFIC_ALARM_VECTOR,
@@ -479,6 +485,15 @@ void handleSettings() {
 </td>\
 </tr>\
 <tr>\
+<th align=left>Power save</th>\
+<td align=right>\
+<select name='power_save'>\
+<option %s value='%d'>Disabled</option>\
+<option %s value='%d'>WiFi OFF (10 min.)</option>\
+</select>\
+</td>\
+</tr>\
+<tr>\
 <th align=left>Stealth</th>\
 <td align=right>\
 <input type='radio' name='stealth' value='0' %s>Off\
@@ -493,10 +508,12 @@ void handleSettings() {
 </td>\
 </tr>\
 </table>\
-<p align=center><INPUT type='submit' value='Save and restart'><p>\
+<p align=center><INPUT type='submit' value='Save and restart'></p>\
 </form>\
 </body>\
 </html>"),
+  (settings->power_save == POWER_SAVE_NONE ? "selected" : ""), POWER_SAVE_NONE,
+  (settings->power_save == POWER_SAVE_WIFI ? "selected" : ""), POWER_SAVE_WIFI,
   (!settings->stealth ? "checked" : "") , (settings->stealth ? "checked" : ""),
   (!settings->no_track ? "checked" : "") , (settings->no_track ? "checked" : "")
   );
@@ -626,7 +643,7 @@ void handleRoot() {
 
 void handleInput() {
 
-  const int size = 1500;
+  const int size = 1520;
   char *Input_temp = (char *) malloc(size);
   if (Input_temp == NULL) {
     return;
@@ -675,6 +692,8 @@ void handleInput() {
       settings->stealth = server.arg(i).toInt();
     } else if (server.argName(i).equals("no_track")) {
       settings->no_track = server.arg(i).toInt();
+    } else if (server.argName(i).equals("power_save")) {
+      settings->power_save = server.arg(i).toInt();
     }
   }
   snprintf_P ( Input_temp, size,
@@ -706,6 +725,7 @@ PSTR("<html>\
 <tr><th align=left>DUMP1090</th><td align=right>%d</td></tr>\
 <tr><th align=left>Stealth</th><td align=right>%s</td></tr>\
 <tr><th align=left>No track</th><td align=right>%s</td></tr>\
+<tr><th align=left>Power save</th><td align=right>%d</td></tr>\
 </table>\
 <hr>\
   <p align=center><h1 align=center>Restart is in progress... Please, wait!</h1></p>\
@@ -717,7 +737,8 @@ PSTR("<html>\
   BOOL_STR(settings->nmea_g), BOOL_STR(settings->nmea_p),
   BOOL_STR(settings->nmea_l), BOOL_STR(settings->nmea_s),
   settings->nmea_out, settings->gdl90, settings->d1090,
-  BOOL_STR(settings->stealth), BOOL_STR(settings->no_track)
+  BOOL_STR(settings->stealth), BOOL_STR(settings->no_track),
+  settings->power_save
   );
   SoC->swSer_enableRx(false);
   server.send ( 200, "text/html", Input_temp );
@@ -727,7 +748,7 @@ PSTR("<html>\
   EEPROM_store();
   RF_Shutdown();
   delay(1000);
-  ESP.restart();
+  SoC->reset();
 }
 
 void handleNotFound() {
@@ -837,13 +858,14 @@ $('form').submit(function(e){\
 //    SoC->swSer_enableRx(true);
     RF_Shutdown();
     delay(1000);
-    ESP.restart();
+    SoC->reset();
   },[](){
     HTTPUpload& upload = server.upload();
     if(upload.status == UPLOAD_FILE_START){
       Serial.setDebugOutput(true);
       SoC->WiFiUDP_stopAll();
-      Serial.printf("Update: %s\n", upload.filename.c_str());
+      SoC->WDT_fini();
+      Serial.printf("Update: %s\r\n", upload.filename.c_str());
       uint32_t maxSketchSpace = SoC->maxSketchSpace();
       if(!Update.begin(maxSketchSpace)){//start with max available size
         Update.printError(Serial);
@@ -854,7 +876,7 @@ $('form').submit(function(e){\
       }
     } else if(upload.status == UPLOAD_FILE_END){
       if(Update.end(true)){ //true to set the size to the current progress
-        Serial.printf("Update Success: %u\nRebooting...\n", upload.totalSize);
+        Serial.printf("Update Success: %u\r\nRebooting...\r\n", upload.totalSize);
       } else {
         Update.printError(Serial);
       }
@@ -898,4 +920,9 @@ void Web_loop()
   if (ThisAircraft.speed < 20.0){
     server.handleClient();
   }
+}
+
+void Web_fini()
+{
+  server.stop();
 }

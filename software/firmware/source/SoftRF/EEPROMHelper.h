@@ -1,6 +1,6 @@
 /*
  * EEPROMHelper.h
- * Copyright (C) 2016-2019 Linar Yusupov
+ * Copyright (C) 2016-2020 Linar Yusupov
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -55,7 +55,7 @@ typedef struct Settings {
     uint8_t  json:2;
 
     char     device_name[8];
-    uint8_t  resvd10;
+    uint8_t  power_save;
     uint8_t  resvd11;
     uint8_t  resvd12;
     uint8_t  resvd13;
@@ -70,11 +70,10 @@ typedef struct EEPROM_S {
     settings_t settings;
 } eeprom_struct_t;
 
-
 typedef union EEPROM_U {
    eeprom_struct_t field;
    uint8_t raw[sizeof(eeprom_struct_t)];
-} eeprom_t;  
+} eeprom_t;
 
 void EEPROM_setup(void);
 void EEPROM_defaults(void);

@@ -7,7 +7,7 @@
  *    Development -  https://github.com/3s1d/fanet-stm32
  *    Deprecated  -  https://github.com/3s1d/fanet
  *
- * Copyright (C) 2017-2019 Linar Yusupov
+ * Copyright (C) 2017-2020 Linar Yusupov
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -207,12 +207,19 @@ bool fanet_decode(void *fanet_pkt, ufo_t *this_aircraft, ufo_t *fop) {
   unsigned int altitude;
   uint8_t speed_byte, climb_byte;
   int speed_int, climb_int;
+  bool rval = false;
 
   if (pkt->ext_header == 0 && pkt->type == 1 ) {  /* Tracking  */
 
-    fop->protocol = RF_PROTOCOL_FANET;
+    /* ignore this device own (relayed) packets */
+    if (pkt->vendor  == SOFRF_FANET_VENDOR_ID &&
+        pkt->address == (this_aircraft->addr & 0xFFFF) /* && */
+        /* pkt->forward == 1 */) {
+      return rval;
+    }
 
-    fop->addr = (pkt->vendor << 16) | pkt->address;
+    fop->protocol = RF_PROTOCOL_FANET;
+    fop->addr     = (pkt->vendor << 16) | pkt->address;
 
 #if defined(FANET_DEPRECATED)
     fop->latitude  = payload_compressed2coord(pkt->latitude, this_aircraft->latitude);
@@ -274,10 +281,10 @@ bool fanet_decode(void *fanet_pkt, ufo_t *this_aircraft, ufo_t *fop) {
     Serial.println();
     Serial.flush();
 #endif
-    return true;
-  } else {
-    return false;
+    rval = true;
   }
+
+  return rval;
 }
 
 size_t fanet_encode(void *fanet_pkt, ufo_t *this_aircraft) {
@@ -312,16 +319,9 @@ size_t fanet_encode(void *fanet_pkt, ufo_t *this_aircraft) {
   pkt->aircraft_type  = AT_TO_FANET(aircraft_type);
 
   int altitude        = constrain(alt, 0, 8190);
-  if(altitude > 2047) {
-    int alt_s = ((altitude + 2) / 4);
-    pkt->altitude_scale = 1;
-    pkt->altitude_msb   = (alt_s & 0x700) >> 16;
-    pkt->altitude_lsb   = (alt_s & 0x0FF);
-  } else {
-    pkt->altitude_scale = 0;
-    pkt->altitude_msb   = (altitude & 0x700) >> 16;
-    pkt->altitude_lsb   = (altitude & 0x0FF);
-  }
+  pkt->altitude_scale = altitude > 2047 ? (altitude = (altitude + 2) / 4, 1) : 0;
+  pkt->altitude_msb   = (altitude & 0x700) >> 8;
+  pkt->altitude_lsb   = (altitude & 0x0FF);
 
   int speed2          = constrain((int)roundf(speed * 2.0f), 0, 635);
   if(speed2 > 127) {

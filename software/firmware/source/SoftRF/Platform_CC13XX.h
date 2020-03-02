@@ -1,6 +1,6 @@
 /*
  * Platform_CC13XX.h
- * Copyright (C) 2019 Linar Yusupov
+ * Copyright (C) 2019-2020 Linar Yusupov
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -21,16 +21,34 @@
 #define PLATFORM_CC13XX_H
 
 #include "IPAddress.h"
+#include <WS2812.h>
 
 /* Maximum of tracked flying objects is now SoC-specific constant */
 #define MAX_TRACKING_OBJECTS    8
 
-#define swSer       Serial
-#define UATSerial   Serial /* TBD */
-#define yield() ({ })
+#define isValidFix()            isValidGNSSFix()
 
-#define SOC_GPIO_PIN_SS       18               // GPIO 11
-#define SOC_GPIO_PIN_RST      LMIC_UNUSED_PIN
+#define uni_begin()             strip.begin()
+#define uni_show()              strip.sendBuffer(LEDs, strip.numPixels())
+#define uni_setPixelColor(i, c) ({ uint32_t temp = c;          \
+                                   LEDs[i][2] = (temp & 0xff); \
+                                   temp = temp >> 8;           \
+                                   LEDs[i][1] = (temp & 0xff); \
+                                   temp = temp >> 8;           \
+                                   LEDs[i][0] = (temp & 0xff); })
+#define uni_numPixels()         strip.numPixels()
+#define uni_Color(r,g,b)        strip.Color(r,g,b)
+#define color_t                 uint32_t
+
+#define SerialOutput            Serial
+#define swSer                   Serial
+#define UATSerial               Serial /* TBD */
+#define yield()                 ({ })
+#define snprintf_P              snprintf
+
+#define SOC_GPIO_PIN_SS         18               // GPIO 11
+#define SOC_GPIO_PIN_RST        LMIC_UNUSED_PIN
+#define SOC_GPIO_PIN_BUZZER     GREEN_LED        // GPIO 7
 
 /* 
  *  UART pins
@@ -41,7 +59,16 @@
  */
 
 #define SOC_GPIO_PIN_MODE_PULLDOWN INPUT_PULLDOWN
-#define SOC_GPIO_PIN_GNSS_PPS SOC_UNUSED_PIN
+#define SOC_GPIO_PIN_GNSS_PPS   SOC_UNUSED_PIN
+#define SOC_GPIO_PIN_STATUS     SOC_UNUSED_PIN
+#define SOC_GPIO_PIN_LED        15 // MOSI (DIO_09)
+
+extern WS2812 strip;
+extern uint8_t LEDs[][3];
+
+#define EXCLUDE_BMP180
+#define EXCLUDE_MPL3115A2
+#define EXCLUDE_NRF905
 
 #endif /* PLATFORM_CC13XX_H */
 

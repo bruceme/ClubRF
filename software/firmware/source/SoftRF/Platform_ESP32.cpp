@@ -1,6 +1,6 @@
 /*
  * Platform_ESP32.cpp
- * Copyright (C) 2018-2019 Linar Yusupov
+ * Copyright (C) 2018-2020 Linar Yusupov
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -20,11 +20,14 @@
 #include <SPI.h>
 #include <esp_err.h>
 #include <esp_wifi.h>
+#include <esp_bt.h>
 #include <soc/rtc_cntl_reg.h>
 #include <Wire.h>
 #include <rom/rtc.h>
 #include <rom/spi_flash.h>
 #include <flashchips.h>
+#include <axp20x.h>
+#include <TFT_eSPI.h>
 
 #include "Platform_ESP32.h"
 #include "SoCHelper.h"
@@ -35,6 +38,7 @@
 #include "BluetoothHelper.h"
 #include "LEDHelper.h"
 #include "BaroHelper.h"
+#include "BatteryHelper.h"
 
 #include <battery.h>
 #include <U8x8lib.h>
@@ -71,11 +75,16 @@ U8X8_SSD1306_128X64_NONAME_2ND_HW_I2C u8x8_heltec(HELTEC_OLED_PIN_RST,
                                                   HELTEC_OLED_PIN_SCL,
                                                   HELTEC_OLED_PIN_SDA);
 
+AXP20X_Class axp;
+
 static U8X8_SSD1306_128X64_NONAME_2ND_HW_I2C *u8x8 = NULL;
+static TFT_eSPI *tft = NULL;
 
 static int esp32_board = ESP32_DEVKIT; /* default */
 
 static portMUX_TYPE GNSS_PPS_mutex = portMUX_INITIALIZER_UNLOCKED;
+static portMUX_TYPE PMU_mutex      = portMUX_INITIALIZER_UNLOCKED;
+volatile bool PMU_Irq = false;
 
 static bool GPIO_21_22_are_busy = false;
 
@@ -83,6 +92,32 @@ static union {
   uint8_t efuse_mac[6];
   uint64_t chipmacid;
 };
+
+static bool OLED_display_frontpage = false;
+static uint32_t prev_tx_packets_counter = 0;
+static uint32_t prev_rx_packets_counter = 0;
+extern uint32_t tx_packets_counter, rx_packets_counter;
+
+const char *OLED_Protocol_ID[] = {
+  [RF_PROTOCOL_LEGACY]    = "L",
+  [RF_PROTOCOL_OGNTP]     = "O",
+  [RF_PROTOCOL_P3I]       = "P",
+  [RF_PROTOCOL_ADSB_1090] = "A",
+  [RF_PROTOCOL_ADSB_UAT]  = "U",
+  [RF_PROTOCOL_FANET]     = "F"
+};
+
+const char SoftRF_text[]   = "SoftRF";
+const char ID_text[]       = "ID";
+const char PROTOCOL_text[] = "PROTOCOL";
+const char RX_text[]       = "RX";
+const char TX_text[]       = "TX";
+
+static void IRAM_ATTR ESP32_PMU_Interrupt_handler() {
+  portENTER_CRITICAL_ISR(&PMU_mutex);
+  PMU_Irq = true;
+  portEXIT_CRITICAL_ISR(&PMU_mutex);
+}
 
 static uint32_t ESP32_getFlashId()
 {
@@ -118,13 +153,7 @@ static void ESP32_setup()
   WRITE_PERI_REG(RTC_CNTL_BROWN_OUT_REG, 0);
 #endif
 
-#if defined(ESP32_CORE_DEVEL) || defined(ESP32_CORE_1_0_1)
   if (psramFound()) {
-#endif /* ESP32_CORE_DEVEL */
-#if defined (ESP32_CORE_1_0_0)
-  /* Temporary workaround until issues with PSRAM will settle down */
-  if (ESP.getFreeHeap() > 4000000) {
-#endif /* ESP32_CORE_1_0_0 */
 
     uint32_t flash_id = ESP32_getFlashId();
 
@@ -133,8 +162,10 @@ static void ESP32_setup()
      *  -----------------+------------+--------------------
      *  DoIt ESP32       | WROOM      | GIGADEVICE_GD25Q32
      *  TTGO LoRa32 V2.0 | PICO-D4 IC | GIGADEVICE_GD25Q32
-     *  TTGO T-Beam V06  |            | WINBOND_NEX_W25Q32_V (confirmed by LilyGO)
-     *  TTGO T8 V1.8     | WROVER     | GIGADEVICE_GD25LQ32
+     *  TTGO T-Beam V06  |            | WINBOND_NEX_W25Q32_V
+     *  TTGO T8  V1.8    | WROVER     | GIGADEVICE_GD25LQ32
+     *  TTGO T5S V1.9    |            | WINBOND_NEX_W25Q32_V
+     *  TTGO T-Watch     |            | WINBOND_NEX_W25Q128_V
      */
 
     switch(flash_id)
@@ -142,6 +173,9 @@ static void ESP32_setup()
     case MakeFlashId(GIGADEVICE_ID, GIGADEVICE_GD25LQ32):
       /* ESP32-WROVER module with ESP32-NODEMCU-ADAPTER */
       hw_info.model = SOFTRF_MODEL_STANDALONE;
+      break;
+    case MakeFlashId(WINBOND_NEX_ID, WINBOND_NEX_W25Q128_V):
+      hw_info.model = SOFTRF_MODEL_SKYWATCH;
       break;
     case MakeFlashId(WINBOND_NEX_ID, WINBOND_NEX_W25Q32_V):
     default:
@@ -152,11 +186,167 @@ static void ESP32_setup()
 
   ledcSetup(LEDC_CHANNEL_BUZZER, 0, LEDC_RESOLUTION_BUZZER);
 
-  if (hw_info.model == SOFTRF_MODEL_PRIME_MK2) {
+  if (hw_info.model == SOFTRF_MODEL_SKYWATCH) {
+    esp32_board = ESP32_TTGO_T_WATCH;
+
+    Wire1.begin(SOC_GPIO_PIN_TWATCH_SEN_SDA , SOC_GPIO_PIN_TWATCH_SEN_SCL);
+    Wire1.beginTransmission(AXP202_SLAVE_ADDRESS);
+    if (Wire1.endTransmission() == 0) {
+
+      axp.begin(Wire1, AXP202_SLAVE_ADDRESS);
+
+      axp.enableIRQ(AXP202_ALL_IRQ, AXP202_OFF);
+      axp.adc1Enable(0xFF, AXP202_OFF);
+
+      axp.setChgLEDMode(AXP20X_LED_LOW_LEVEL);
+
+      axp.setPowerOutPut(AXP202_LDO2, AXP202_ON); // BL
+      axp.setPowerOutPut(AXP202_LDO3, AXP202_ON); // S76G (MCU + LoRa)
+      axp.setLDO4Voltage(AXP202_LDO4_1800MV);
+      axp.setPowerOutPut(AXP202_LDO4, AXP202_ON); // S76G (Sony GNSS)
+
+      pinMode(SOC_GPIO_PIN_TWATCH_PMU_IRQ, INPUT_PULLUP);
+
+      attachInterrupt(digitalPinToInterrupt(SOC_GPIO_PIN_TWATCH_PMU_IRQ),
+                      ESP32_PMU_Interrupt_handler, FALLING);
+
+      axp.adc1Enable(AXP202_BATT_VOL_ADC1, AXP202_ON);
+      axp.enableIRQ(AXP202_PEK_LONGPRESS_IRQ | AXP202_PEK_SHORTPRESS_IRQ, true);
+      axp.clearIRQ();
+    }
+
+  } else if (hw_info.model == SOFTRF_MODEL_PRIME_MK2) {
     esp32_board = ESP32_TTGO_T_BEAM;
-    hw_info.revision = 2;
+
+    Wire1.begin(TTGO_V2_OLED_PIN_SDA , TTGO_V2_OLED_PIN_SCL);
+    Wire1.beginTransmission(AXP192_SLAVE_ADDRESS);
+    if (Wire1.endTransmission() == 0) {
+      hw_info.revision = 8;
+
+      axp.begin(Wire1, AXP192_SLAVE_ADDRESS);
+
+      axp.setChgLEDMode(AXP20X_LED_LOW_LEVEL);
+
+      axp.setPowerOutPut(AXP192_LDO2, AXP202_ON);
+      axp.setPowerOutPut(AXP192_LDO3, AXP202_ON);
+      axp.setPowerOutPut(AXP192_DCDC1, AXP202_ON);
+      axp.setPowerOutPut(AXP192_DCDC2, AXP202_ON); // NC
+      axp.setPowerOutPut(AXP192_EXTEN, AXP202_ON);
+
+      axp.setDCDC1Voltage(3300); //       AXP192 power-on value: 3300
+      axp.setLDO2Voltage (3300); // LoRa, AXP192 power-on value: 3300
+      axp.setLDO3Voltage (3000); // GPS,  AXP192 power-on value: 2800
+
+      pinMode(SOC_GPIO_PIN_TBEAM_V08_PMU_IRQ, INPUT_PULLUP);
+
+      attachInterrupt(digitalPinToInterrupt(SOC_GPIO_PIN_TBEAM_V08_PMU_IRQ),
+                      ESP32_PMU_Interrupt_handler, FALLING);
+
+      axp.enableIRQ(AXP202_PEK_LONGPRESS_IRQ | AXP202_PEK_SHORTPRESS_IRQ, true);
+      axp.clearIRQ();
+    } else {
+      hw_info.revision = 2;
+    }
     lmic_pins.rst = SOC_GPIO_PIN_TBEAM_RF_RST_V05;
   }
+}
+
+static void ESP32_loop()
+{
+  if ((hw_info.model    == SOFTRF_MODEL_PRIME_MK2 &&
+       hw_info.revision == 8)                     ||
+       hw_info.model    == SOFTRF_MODEL_SKYWATCH) {
+
+    bool is_irq = false;
+    bool down = false;
+
+    portENTER_CRITICAL_ISR(&PMU_mutex);
+    is_irq = PMU_Irq;
+    portEXIT_CRITICAL_ISR(&PMU_mutex);
+
+    if (is_irq) {
+
+      if (axp.readIRQ() == AXP_PASS) {
+
+        if (axp.isPEKLongtPressIRQ()) {
+          down = true;
+#if 0
+          Serial.println(F("Longt Press IRQ"));
+          Serial.flush();
+#endif
+        }
+        if (axp.isPEKShortPressIRQ()) {
+#if 0
+          Serial.println(F("Short Press IRQ"));
+          Serial.flush();
+#endif
+        }
+
+        axp.clearIRQ();
+      }
+
+      portENTER_CRITICAL_ISR(&PMU_mutex);
+      PMU_Irq = false;
+      portEXIT_CRITICAL_ISR(&PMU_mutex);
+
+      if (down) {
+        shutdown("  OFF  ");
+      }
+    }
+
+    if (isTimeToBattery()) {
+      if (Battery_voltage() > Battery_threshold()) {
+        axp.setChgLEDMode(AXP20X_LED_LOW_LEVEL);
+      } else {
+        axp.setChgLEDMode(AXP20X_LED_BLINK_1HZ);
+      }
+    }
+  }
+}
+
+static void ESP32_fini()
+{
+  SPI.end();
+
+  esp_wifi_stop();
+  esp_bt_controller_disable();
+
+  if (hw_info.model    == SOFTRF_MODEL_SKYWATCH) {
+
+    axp.setChgLEDMode(AXP20X_LED_OFF);
+
+    axp.setPowerOutPut(AXP202_LDO2, AXP202_OFF); // BL
+    axp.setPowerOutPut(AXP202_LDO4, AXP202_OFF); // S76G (Sony GNSS)
+    axp.setPowerOutPut(AXP202_LDO3, AXP202_OFF); // S76G (MCU + LoRa)
+
+    delay(20);
+
+    esp_sleep_enable_ext0_wakeup((gpio_num_t) SOC_GPIO_PIN_TWATCH_PMU_IRQ, 0); // 1 = High, 0 = Low
+
+  } else if (hw_info.model    == SOFTRF_MODEL_PRIME_MK2 &&
+             hw_info.revision == 8) {
+
+    axp.setChgLEDMode(AXP20X_LED_OFF);
+
+    delay(2000); /* Keep 'OFF' message on OLED for 2 seconds */
+
+    axp.setPowerOutPut(AXP192_LDO2, AXP202_OFF);
+    axp.setPowerOutPut(AXP192_LDO3, AXP202_OFF);
+    axp.setPowerOutPut(AXP192_DCDC2, AXP202_OFF);
+    axp.setPowerOutPut(AXP192_DCDC1, AXP202_OFF);
+    axp.setPowerOutPut(AXP192_EXTEN, AXP202_OFF);
+
+    delay(20);
+
+    esp_sleep_enable_ext0_wakeup((gpio_num_t) SOC_GPIO_PIN_TBEAM_V08_PMU_IRQ, 0); // 1 = High, 0 = Low
+  }
+
+  esp_deep_sleep_start();
+}
+
+static void ESP32_reset()
+{
+  ESP.restart();
 }
 
 static uint32_t ESP32_getChipId()
@@ -351,22 +541,26 @@ static IPAddress ESP32_WiFi_get_broadcast()
 static void ESP32_WiFi_transmit_UDP(int port, byte *buf, size_t size)
 {
   IPAddress ClientIP;
+  WiFiMode_t mode = WiFi.getMode();
+  int i = 0;
 
-  if (WiFi.getMode() == WIFI_STA) {
+  switch (mode)
+  {
+  case WIFI_STA:
     ClientIP = ESP32_WiFi_get_broadcast();
 
     Uni_Udp.beginPacket(ClientIP, port);
     Uni_Udp.write(buf, size);
     Uni_Udp.endPacket();
 
-  } else {
+    break;
+  case WIFI_AP:
     wifi_sta_list_t stations;
     ESP_ERROR_CHECK(esp_wifi_ap_get_sta_list(&stations));
 
     tcpip_adapter_sta_list_t infoList;
     ESP_ERROR_CHECK(tcpip_adapter_get_sta_list(&stations, &infoList));
 
-    int i = 0;
     while(i < infoList.num) {
       ClientIP = infoList.sta[i++].ip.addr;
 
@@ -374,6 +568,10 @@ static void ESP32_WiFi_transmit_UDP(int port, byte *buf, size_t size)
       Uni_Udp.write(buf, size);
       Uni_Udp.endPacket();
     }
+    break;
+  case WIFI_OFF:
+  default:
+    break;
   }
 }
 
@@ -387,6 +585,26 @@ static bool ESP32_WiFi_hostname(String aHostname)
   return WiFi.setHostname(aHostname.c_str());
 }
 
+static int ESP32_WiFi_clients_count()
+{
+  WiFiMode_t mode = WiFi.getMode();
+
+  switch (mode)
+  {
+  case WIFI_AP:
+    wifi_sta_list_t stations;
+    ESP_ERROR_CHECK(esp_wifi_ap_get_sta_list(&stations));
+
+    tcpip_adapter_sta_list_t infoList;
+    ESP_ERROR_CHECK(tcpip_adapter_get_sta_list(&stations, &infoList));
+
+    return infoList.num;
+  case WIFI_STA:
+  default:
+    return -1; /* error */
+  }
+}
+
 static bool ESP32_EEPROM_begin(size_t size)
 {
   return EEPROM.begin(size);
@@ -394,7 +612,12 @@ static bool ESP32_EEPROM_begin(size_t size)
 
 static void ESP32_SPI_begin()
 {
-  SPI.begin(SOC_GPIO_PIN_SCK, SOC_GPIO_PIN_MISO, SOC_GPIO_PIN_MOSI, SOC_GPIO_PIN_SS);
+  if (esp32_board != ESP32_TTGO_T_WATCH) {
+    SPI.begin(SOC_GPIO_PIN_SCK, SOC_GPIO_PIN_MISO, SOC_GPIO_PIN_MOSI, SOC_GPIO_PIN_SS);
+  } else {
+    SPI.begin(SOC_GPIO_PIN_TWATCH_TFT_SCK, SOC_GPIO_PIN_TWATCH_TFT_MISO,
+              SOC_GPIO_PIN_TWATCH_TFT_MOSI, -1);
+  }
 }
 
 static void ESP32_swSer_begin(unsigned long baud)
@@ -405,11 +628,26 @@ static void ESP32_swSer_begin(unsigned long baud)
     Serial.print(hw_info.revision);
     Serial.println(F(") is detected."));
 
-    swSer.begin(baud, SERIAL_8N1, SOC_GPIO_PIN_TBEAM_RX, SOC_GPIO_PIN_TBEAM_TX);
+    if (hw_info.revision == 8) {
+      swSer.begin(baud, SERIAL_IN_BITS, SOC_GPIO_PIN_TBEAM_V08_RX, SOC_GPIO_PIN_TBEAM_V08_TX);
+    } else {
+      swSer.begin(baud, SERIAL_IN_BITS, SOC_GPIO_PIN_TBEAM_V05_RX, SOC_GPIO_PIN_TBEAM_V05_TX);
+    }
   } else {
-    /* open Standalone's GNSS port */
-    swSer.begin(baud, SERIAL_8N1, SOC_GPIO_PIN_GNSS_RX, SOC_GPIO_PIN_GNSS_TX);
+    if (esp32_board == ESP32_TTGO_T_WATCH) {
+      Serial.println(F("INFO: TTGO T-Watch is detected."));
+      swSer.begin(baud, SERIAL_IN_BITS, SOC_GPIO_PIN_TWATCH_RX, SOC_GPIO_PIN_TWATCH_TX);
+    } else if (esp32_board == ESP32_TTGO_V2_OLED) {
+      /* 'Mini' (TTGO LoRa V2 + GNSS) */
+      swSer.begin(baud, SERIAL_IN_BITS, TTGO_V2_PIN_GNSS_RX, TTGO_V2_PIN_GNSS_TX);
+    } else {
+      /* open Standalone's GNSS port */
+      swSer.begin(baud, SERIAL_IN_BITS, SOC_GPIO_PIN_GNSS_RX, SOC_GPIO_PIN_GNSS_TX);
+    }
   }
+
+  /* Default Rx buffer size (256 bytes) is sometimes not big enough */
+  // swSer.setRxBufferSize(512);
 
   /* Need to gather some statistics on variety of flash IC usage */
   Serial.print(F("Flash memory ID: "));
@@ -421,41 +659,14 @@ static void ESP32_swSer_enableRx(boolean arg)
 
 }
 
-static bool OLED_display_frontpage = false;
-static uint32_t prev_tx_packets_counter = 0;
-static uint32_t prev_rx_packets_counter = 0;
-extern uint32_t tx_packets_counter, rx_packets_counter;
-
-const char *OLED_Protocol_ID[] = {
-  [RF_PROTOCOL_LEGACY]    = "L",
-  [RF_PROTOCOL_OGNTP]     = "O",
-  [RF_PROTOCOL_P3I]       = "P",
-  [RF_PROTOCOL_ADSB_1090] = "A",
-  [RF_PROTOCOL_ADSB_UAT]  = "U",
-  [RF_PROTOCOL_FANET]     = "F"
-};
-
 static byte ESP32_Display_setup()
 {
   byte rval = DISPLAY_NONE;
 
-  /* SSD1306 I2C OLED probing */
-  if (GPIO_21_22_are_busy) {
-    Wire1.begin(HELTEC_OLED_PIN_SDA , HELTEC_OLED_PIN_SCL);
-    Wire1.beginTransmission(SSD1306_OLED_I2C_ADDR);
-    if (Wire1.endTransmission() == 0) {
-      u8x8 = &u8x8_heltec;
-      esp32_board = ESP32_HELTEC_OLED;
-      rval = DISPLAY_OLED_HELTEC;
-    }
-  } else {
-    Wire1.begin(TTGO_V2_OLED_PIN_SDA , TTGO_V2_OLED_PIN_SCL);
-    Wire1.beginTransmission(SSD1306_OLED_I2C_ADDR);
-    if (Wire1.endTransmission() == 0) {
-      u8x8 = &u8x8_ttgo;
-      esp32_board = ESP32_TTGO_V2_OLED;
-      rval = DISPLAY_OLED_TTGO;
-    } else {
+  if (esp32_board != ESP32_TTGO_T_WATCH) {
+
+    /* SSD1306 I2C OLED probing */
+    if (GPIO_21_22_are_busy) {
       Wire1.begin(HELTEC_OLED_PIN_SDA , HELTEC_OLED_PIN_SCL);
       Wire1.beginTransmission(SSD1306_OLED_I2C_ADDR);
       if (Wire1.endTransmission() == 0) {
@@ -463,14 +674,61 @@ static byte ESP32_Display_setup()
         esp32_board = ESP32_HELTEC_OLED;
         rval = DISPLAY_OLED_HELTEC;
       }
+    } else {
+      Wire1.begin(TTGO_V2_OLED_PIN_SDA , TTGO_V2_OLED_PIN_SCL);
+      Wire1.beginTransmission(SSD1306_OLED_I2C_ADDR);
+      if (Wire1.endTransmission() == 0) {
+        u8x8 = &u8x8_ttgo;
+        esp32_board = ESP32_TTGO_V2_OLED;
+        rval = DISPLAY_OLED_TTGO;
+      } else {
+        if (!(hw_info.model    == SOFTRF_MODEL_PRIME_MK2 &&
+              hw_info.revision == 8)) {
+          Wire1.begin(HELTEC_OLED_PIN_SDA , HELTEC_OLED_PIN_SCL);
+          Wire1.beginTransmission(SSD1306_OLED_I2C_ADDR);
+          if (Wire1.endTransmission() == 0) {
+            u8x8 = &u8x8_heltec;
+            esp32_board = ESP32_HELTEC_OLED;
+            rval = DISPLAY_OLED_HELTEC;
+          }
+        }
+      }
     }
-  }
 
-  if (u8x8) {
-    u8x8->begin();
-    u8x8->setFont(u8x8_font_chroma48medium8_r);
-    u8x8->clear();
-    u8x8->draw2x2String(2, 3, "SoftRF");
+    if (u8x8) {
+      u8x8->begin();
+      u8x8->setFont(u8x8_font_chroma48medium8_r);
+      u8x8->clear();
+      u8x8->draw2x2String(2, 3, SoftRF_text);
+    }
+
+  } else {  /* ESP32_TTGO_T_WATCH */
+
+    ESP32_SPI_begin();
+
+    tft = new TFT_eSPI(LV_HOR_RES, LV_VER_RES);
+    tft->init();
+    tft->setRotation(0);
+    tft->fillScreen(TFT_NAVY);
+
+    ledcAttachPin(SOC_GPIO_PIN_TWATCH_TFT_BL, 1);
+    ledcSetup(BACKLIGHT_CHANNEL, 12000, 8);
+
+    for (int level = 0; level < 255; level += 25) {
+      ledcWrite(BACKLIGHT_CHANNEL, level);
+      delay(100);
+    }
+
+    tft->setTextFont(4);
+    tft->setTextSize(2);
+    tft->setTextColor(TFT_WHITE, TFT_NAVY);
+
+    uint16_t tbw = tft->textWidth(SoftRF_text);
+    uint16_t tbh = tft->fontHeight();
+    tft->setCursor((tft->width() - tbw)/2, (tft->height() - tbh)/2);
+    tft->println(SoftRF_text);
+
+    rval = DISPLAY_TFT_TTGO;
   }
 
   return rval;
@@ -481,91 +739,240 @@ static void ESP32_Display_loop()
   char buf[16];
   uint32_t disp_value;
 
-  if (u8x8) {
-    if (!OLED_display_frontpage) {
+  uint16_t tbw;
+  uint16_t tbh;
 
-      u8x8->clear();
+  switch (hw_info.display)
+  {
+  case DISPLAY_TFT_TTGO:
+    if (tft) {
+      if (!OLED_display_frontpage) {
+        tft->fillScreen(TFT_NAVY);
 
-      u8x8->drawString(1, 1, "ID");
+        tft->setTextFont(2);
+        tft->setTextSize(2);
+        tft->setTextColor(TFT_WHITE, TFT_NAVY);
 
-      itoa(ThisAircraft.addr & 0xFFFFFF, buf, 16);
-      u8x8->draw2x2String(0, 2, buf);
+        tbw = tft->textWidth(ID_text);
+        tbh = tft->fontHeight();
 
-      u8x8->drawString(8, 1, "PROTOCOL");
+        tft->setCursor(tft->textWidth(" "), tft->height()/6 - tbh);
+        tft->print(ID_text);
 
-      u8x8->draw2x2String(14, 2, OLED_Protocol_ID[ThisAircraft.protocol]);
+        tbw = tft->textWidth(PROTOCOL_text);
 
-      u8x8->drawString(1, 5, "RX");
+        tft->setCursor(tft->width() - tbw - tft->textWidth(" "),
+                       tft->height()/6 - tbh);
+        tft->print(PROTOCOL_text);
 
-      itoa(rx_packets_counter % 1000, buf, 10);
-      u8x8->draw2x2String(0, 6, buf);
+        tbw = tft->textWidth(RX_text);
+        tbh = tft->fontHeight();
 
-      u8x8->drawString(9, 5, "TX");
+        tft->setCursor(tft->textWidth("   "), tft->height()/2 - tbh);
+        tft->print(RX_text);
 
-      itoa(tx_packets_counter % 1000, buf, 10);
-      u8x8->draw2x2String(8, 6, buf);
+        tbw = tft->textWidth(TX_text);
 
-      OLED_display_frontpage = true;
-    } else {
-      if (rx_packets_counter > prev_rx_packets_counter) {
-        disp_value = rx_packets_counter % 1000;
-        itoa(disp_value, buf, 10);
+        tft->setCursor(tft->width()/2 + tft->textWidth("   "),
+                       tft->height()/2 - tbh);
+        tft->print(TX_text);
 
-        if (disp_value < 10) {
-          strcat_P(buf,PSTR("  "));
-        } else {
-          if (disp_value < 100) {
-            strcat_P(buf,PSTR(" "));
-          };
+        tft->setTextFont(4);
+        tft->setTextSize(2);
+
+        itoa(ThisAircraft.addr & 0xFFFFFF, buf, 16);
+
+        tbw = tft->textWidth(buf);
+        tbh = tft->fontHeight();
+
+        tft->setCursor(tft->textWidth(" "), tft->height()/6);
+        tft->print(buf);
+
+        tbw = tft->textWidth(OLED_Protocol_ID[ThisAircraft.protocol]);
+
+        tft->setCursor(tft->width() - tbw - tft->textWidth(" "),
+                       tft->height()/6);
+        tft->print(OLED_Protocol_ID[ThisAircraft.protocol]);
+
+        itoa(rx_packets_counter % 1000, buf, 10);
+        tft->setCursor(tft->textWidth(" "), tft->height()/2);
+        tft->print(buf);
+
+        itoa(tx_packets_counter % 1000, buf, 10);
+        tft->setCursor(tft->width()/2 + tft->textWidth(" "), tft->height()/2);
+        tft->print(buf);
+
+        OLED_display_frontpage = true;
+
+      } else { /* OLED_display_frontpage */
+
+        if (rx_packets_counter > prev_rx_packets_counter) {
+          disp_value = rx_packets_counter % 1000;
+          itoa(disp_value, buf, 10);
+
+          if (disp_value < 10) {
+            strcat_P(buf,PSTR("  "));
+          } else {
+            if (disp_value < 100) {
+              strcat_P(buf,PSTR(" "));
+            };
+          }
+
+          tft->setTextFont(4);
+          tft->setTextSize(2);
+
+          tft->setCursor(tft->textWidth(" "), tft->height()/2);
+          tft->print(buf);
+
+          prev_rx_packets_counter = rx_packets_counter;
         }
+        if (tx_packets_counter > prev_tx_packets_counter) {
+          disp_value = tx_packets_counter % 1000;
+          itoa(disp_value, buf, 10);
 
-        u8x8->draw2x2String(0, 6, buf);
-        prev_rx_packets_counter = rx_packets_counter;
-      }
-      if (tx_packets_counter > prev_tx_packets_counter) {
-        disp_value = tx_packets_counter % 1000;
-        itoa(disp_value, buf, 10);
+          if (disp_value < 10) {
+            strcat_P(buf,PSTR("  "));
+          } else {
+            if (disp_value < 100) {
+              strcat_P(buf,PSTR(" "));
+            };
+          }
 
-        if (disp_value < 10) {
-          strcat_P(buf,PSTR("  "));
-        } else {
-          if (disp_value < 100) {
-            strcat_P(buf,PSTR(" "));
-          };
+          tft->setTextFont(4);
+          tft->setTextSize(2);
+
+          tft->setCursor(tft->width()/2 + tft->textWidth(" "), tft->height()/2);
+          tft->print(buf);
+
+          prev_tx_packets_counter = tx_packets_counter;
         }
-
-        u8x8->draw2x2String(8, 6, buf);
-        prev_tx_packets_counter = tx_packets_counter;
       }
     }
+
+    break;
+
+  case DISPLAY_OLED_TTGO:
+  case DISPLAY_OLED_HELTEC:
+    if (u8x8) {
+      if (!OLED_display_frontpage) {
+
+        u8x8->clear();
+
+        u8x8->drawString(1, 1, ID_text);
+
+        itoa(ThisAircraft.addr & 0xFFFFFF, buf, 16);
+        u8x8->draw2x2String(0, 2, buf);
+
+        u8x8->drawString(8, 1, PROTOCOL_text);
+
+        u8x8->draw2x2String(14, 2, OLED_Protocol_ID[ThisAircraft.protocol]);
+
+        u8x8->drawString(1, 5, RX_text);
+
+        itoa(rx_packets_counter % 1000, buf, 10);
+        u8x8->draw2x2String(0, 6, buf);
+
+        u8x8->drawString(9, 5, TX_text);
+
+        if (settings->txpower == RF_TX_POWER_OFF ) {
+          strcpy(buf, "OFF");
+        } else {
+          itoa(tx_packets_counter % 1000, buf, 10);
+        }
+        u8x8->draw2x2String(8, 6, buf);
+
+        OLED_display_frontpage = true;
+
+      } else {  /* OLED_display_frontpage */
+
+        if (rx_packets_counter > prev_rx_packets_counter) {
+          disp_value = rx_packets_counter % 1000;
+          itoa(disp_value, buf, 10);
+
+          if (disp_value < 10) {
+            strcat_P(buf,PSTR("  "));
+          } else {
+            if (disp_value < 100) {
+              strcat_P(buf,PSTR(" "));
+            };
+          }
+
+          u8x8->draw2x2String(0, 6, buf);
+          prev_rx_packets_counter = rx_packets_counter;
+        }
+        if (tx_packets_counter > prev_tx_packets_counter) {
+          disp_value = tx_packets_counter % 1000;
+          itoa(disp_value, buf, 10);
+
+          if (disp_value < 10) {
+            strcat_P(buf,PSTR("  "));
+          } else {
+            if (disp_value < 100) {
+              strcat_P(buf,PSTR(" "));
+            };
+          }
+
+          u8x8->draw2x2String(8, 6, buf);
+          prev_tx_packets_counter = tx_packets_counter;
+        }
+      }
+    }
+
+    break;
+
+  case DISPLAY_NONE:
+  default:
+    break;
+  }
+}
+
+static void ESP32_Display_fini(const char *msg)
+{
+  if (u8x8) {
+    u8x8->setFont(u8x8_font_chroma48medium8_r);
+    u8x8->clear();
+    u8x8->draw2x2String(1, 3, msg);
+//    u8x8->noDisplay();
   }
 }
 
 static float ESP32_Battery_voltage()
 {
-  float voltage = ((float) read_voltage()) * 0.001 ;
+  float voltage = 0.0;
 
-  /* T-Beam has voltage divider 100k/100k on board */
-  return (hw_info.model == SOFTRF_MODEL_PRIME_MK2 ? 2 * voltage : voltage);
+  if ((hw_info.model    == SOFTRF_MODEL_PRIME_MK2 &&
+       hw_info.revision == 8)                     ||
+       hw_info.model    == SOFTRF_MODEL_SKYWATCH) {
+
+    /* T-Beam v08 and T-Watch have PMU */
+    if (axp.isBatteryConnect()) {
+      voltage = axp.getBattVoltage();
+    }
+  } else {
+    voltage = (float) read_voltage();
+
+    /* T-Beam v02-v07 has voltage divider 100k/100k on board */
+    if (hw_info.model == SOFTRF_MODEL_PRIME_MK2) {
+      voltage += voltage;
+    }
+  }
+
+  return (voltage * 0.001);
 }
 
 static void ESP32_Battery_setup()
 {
-  calibrate_voltage(hw_info.model == SOFTRF_MODEL_PRIME_MK2 ?
-                    ADC1_GPIO35_CHANNEL : ADC1_GPIO36_CHANNEL);
-#if 0
-  if (hw_info.model == SOFTRF_MODEL_PRIME_MK2) {
-    float voltage = ESP32_Battery_voltage();
-    // Serial.println(voltage);
-    if (voltage < 2.0) {
+  if ((hw_info.model    == SOFTRF_MODEL_PRIME_MK2 &&
+       hw_info.revision == 8)                     ||
+       hw_info.model    == SOFTRF_MODEL_SKYWATCH) {
 
-      /* work around https://github.com/LilyGO/TTGO-T-Beam/issues/3 */
-      WRITE_PERI_REG(RTC_CNTL_BROWN_OUT_REG, 0);
-      Serial.println(F("WARNING: Low battery voltage is detected!"
-                       " Brownout control is disabled."));
-    }
+    /* T-Beam v08 and T-Watch have PMU */
+
+    /* TBD */
+  } else {
+    calibrate_voltage(hw_info.model == SOFTRF_MODEL_PRIME_MK2 ?
+                      ADC1_GPIO35_CHANNEL : ADC1_GPIO36_CHANNEL);
   }
-#endif
 }
 
 static void IRAM_ATTR ESP32_GNSS_PPS_Interrupt_handler() {
@@ -584,7 +991,11 @@ static unsigned long ESP32_get_PPS_TimeMarker() {
 
 static bool ESP32_Baro_setup() {
 
-  if (hw_info.model != SOFTRF_MODEL_PRIME_MK2) {
+  if (hw_info.model == SOFTRF_MODEL_SKYWATCH) {
+
+    return false;
+
+  } else if (hw_info.model != SOFTRF_MODEL_PRIME_MK2) {
 
     if (hw_info.rf != RF_IC_SX1276 || RF_SX1276_RST_is_connected)
       return false;
@@ -624,7 +1035,12 @@ static bool ESP32_Baro_setup() {
 static void ESP32_UATSerial_begin(unsigned long baud)
 {
   /* open Standalone's I2C/UATSerial port */
-  UATSerial.begin(baud, SERIAL_8N1, SOC_GPIO_PIN_CE, SOC_GPIO_PIN_PWR);
+  UATSerial.begin(baud, SERIAL_IN_BITS, SOC_GPIO_PIN_CE, SOC_GPIO_PIN_PWR);
+}
+
+static void ESP32_UATSerial_updateBaudRate(unsigned long baud)
+{
+  UATSerial.updateBaudRate(baud);
 }
 
 static void ESP32_CC13XX_restart()
@@ -643,15 +1059,21 @@ static void ESP32_CC13XX_restart()
 
 static void ESP32_WDT_setup()
 {
-#if defined(ESP32_CORE_DEVEL) || defined(ESP32_CORE_1_0_1)
   enableLoopWDT();
-#endif /* ESP32_CORE_DEVEL */
+}
+
+static void ESP32_WDT_fini()
+{
+  disableLoopWDT();
 }
 
 const SoC_ops_t ESP32_ops = {
   SOC_ESP32,
   "ESP32",
   ESP32_setup,
+  ESP32_loop,
+  ESP32_fini,
+  ESP32_reset,
   ESP32_getChipId,
   ESP32_getResetInfoPtr,
   ESP32_getResetInfo,
@@ -660,10 +1082,10 @@ const SoC_ops_t ESP32_ops = {
   ESP32_Sound_test,
   ESP32_maxSketchSpace,
   ESP32_WiFi_setOutputPower,
-  ESP32_WiFi_get_broadcast,
   ESP32_WiFi_transmit_UDP,
   ESP32_WiFiUDP_stopAll,
   ESP32_WiFi_hostname,
+  ESP32_WiFi_clients_count,
   ESP32_EEPROM_begin,
   ESP32_SPI_begin,
   ESP32_swSer_begin,
@@ -671,6 +1093,7 @@ const SoC_ops_t ESP32_ops = {
   &ESP32_Bluetooth_ops,
   ESP32_Display_setup,
   ESP32_Display_loop,
+  ESP32_Display_fini,
   ESP32_Battery_setup,
   ESP32_Battery_voltage,
   ESP32_GNSS_PPS_Interrupt_handler,
@@ -678,7 +1101,8 @@ const SoC_ops_t ESP32_ops = {
   ESP32_Baro_setup,
   ESP32_UATSerial_begin,
   ESP32_CC13XX_restart,
-  ESP32_WDT_setup
+  ESP32_WDT_setup,
+  ESP32_WDT_fini
 };
 
 #endif /* ESP32 */

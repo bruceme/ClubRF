@@ -1,6 +1,6 @@
 /*
  * Platform_RPi.cpp
- * Copyright (C) 2018-2019 Linar Yusupov
+ * Copyright (C) 2018-2020 Linar Yusupov
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -58,6 +58,9 @@
 #include "GDL90Helper.h"
 #include "D1090Helper.h"
 #include "JSONHelper.h"
+#include "WiFiHelper.h"
+#include "EPDHelper.h"
+#include "BatteryHelper.h"
 
 #include "TCPServer.h"
 
@@ -73,7 +76,11 @@ lmic_pinmap lmic_pins = {
     .nss = SOC_GPIO_PIN_SS,
     .rxtx = { LMIC_UNUSED_PIN, LMIC_UNUSED_PIN },
     .rst = SOC_GPIO_PIN_RST,
+#if !defined(USE_OGN_RF_DRIVER)
     .dio = {LMIC_UNUSED_PIN, LMIC_UNUSED_PIN, LMIC_UNUSED_PIN},
+#else
+    .dio = {SOC_GPIO_PIN_DIO0, LMIC_UNUSED_PIN, LMIC_UNUSED_PIN},
+#endif
 };
 
 TTYSerial Serial1("/dev/ttyAMA0");
@@ -93,7 +100,7 @@ settings_t *settings = &eeprom_block.field.settings;
 ufo_t ThisAircraft;
 aircraft the_aircraft;
 
-char UDPpacketBuffer[256]; // buffer to hold incoming and outgoing packets
+char UDPpacketBuffer[UDP_PACKET_BUFSIZE]; // buffer to hold incoming and outgoing packets
 
 hardware_info_t hw_info = {
   .model    = SOFTRF_MODEL_RASPBERRY,
@@ -112,37 +119,129 @@ std::string input_line;
 
 TCPServer Traffic_TCP_Server;
 
-#define isValidFix() (isValidGNSSFix() || isValidGPSDFix())
+//-------------------------------------------------------------------------
+//
+// The MIT License (MIT)
+//
+// Copyright (c) 2015 Andrew Duncan
+//
+// Permission is hereby granted, free of charge, to any person obtaining a
+// copy of this software and associated documentation files (the
+// "Software"), to deal in the Software without restriction, including
+// without limitation the rights to use, copy, modify, merge, publish,
+// distribute, sublicense, and/or sell copies of the Software, and to
+// permit persons to whom the Software is furnished to do so, subject to
+// the following conditions:
+//
+// The above copyright notice and this permission notice shall be included
+// in all copies or substantial portions of the Software.
+//
+// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS
+// OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+// MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
+// IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+// CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT,
+// TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
+// SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+//
+//-------------------------------------------------------------------------
+
+#include <fcntl.h>
+#include <inttypes.h>
+#include <stdint.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+
+#include <sys/ioctl.h>
+
+static uint32_t SerialNumber = 0;
+
+void RPi_SerialNumber(void)
+{
+    int fd = open("/dev/vcio", 0);
+    if (fd == -1)
+    {
+        perror("open /dev/vcio");
+        exit(EXIT_FAILURE);
+    }
+
+    uint32_t property[32] =
+    {
+        0x00000000,
+        0x00000000,
+        0x00010004,
+        0x00000010,
+        0x00000000,
+        0x00000000,
+        0x00000000,
+        0x00000000,
+        0x00000000,
+        0x00000000
+    };
+
+    property[0] = 10 * sizeof(property[0]);
+
+    if (ioctl(fd, _IOWR(100, 0, char *), property) == -1)
+    {
+        perror("ioctl");
+        exit(EXIT_FAILURE);
+    }
+
+    close(fd);
+
+    SerialNumber = property[5];
+}
+
+//----- end of MIT License ------------------------------------------------
 
 static void RPi_setup()
 {
-  eeprom_block.field.magic = SOFTRF_EEPROM_MAGIC;
-  eeprom_block.field.version = SOFTRF_EEPROM_VERSION;
-  eeprom_block.field.settings.mode = SOFTRF_MODE_NORMAL;
-  eeprom_block.field.settings.rf_protocol = RF_PROTOCOL_OGNTP;
-  eeprom_block.field.settings.band = RF_BAND_EU;
+  eeprom_block.field.magic                  = SOFTRF_EEPROM_MAGIC;
+  eeprom_block.field.version                = SOFTRF_EEPROM_VERSION;
+  eeprom_block.field.settings.mode          = SOFTRF_MODE_NORMAL;
+  eeprom_block.field.settings.rf_protocol   = RF_PROTOCOL_OGNTP;
+  eeprom_block.field.settings.band          = RF_BAND_EU;
   eeprom_block.field.settings.aircraft_type = AIRCRAFT_TYPE_GLIDER;
-  eeprom_block.field.settings.txpower = RF_TX_POWER_FULL;
-  eeprom_block.field.settings.volume = BUZZER_VOLUME_FULL;
-  eeprom_block.field.settings.pointer = DIRECTION_NORTH_UP;
-  eeprom_block.field.settings.bluetooth = BLUETOOTH_OFF;
-  eeprom_block.field.settings.alarm = TRAFFIC_ALARM_DISTANCE;
+  eeprom_block.field.settings.txpower       = RF_TX_POWER_FULL;
+  eeprom_block.field.settings.volume        = BUZZER_VOLUME_FULL;
+  eeprom_block.field.settings.pointer       = DIRECTION_NORTH_UP;
+  eeprom_block.field.settings.bluetooth     = BLUETOOTH_OFF;
+  eeprom_block.field.settings.alarm         = TRAFFIC_ALARM_DISTANCE;
 
-  eeprom_block.field.settings.nmea_g   = true;
-  eeprom_block.field.settings.nmea_p   = false;
-  eeprom_block.field.settings.nmea_l   = true;
-  eeprom_block.field.settings.nmea_s   = true;
-  eeprom_block.field.settings.nmea_out = NMEA_UART;
-  eeprom_block.field.settings.gdl90    = GDL90_OFF;
-  eeprom_block.field.settings.d1090    = D1090_OFF;
-  eeprom_block.field.settings.json     = JSON_OFF;
-  eeprom_block.field.settings.stealth  = false;
-  eeprom_block.field.settings.no_track = false;
+  eeprom_block.field.settings.nmea_g        = true;
+  eeprom_block.field.settings.nmea_p        = false;
+  eeprom_block.field.settings.nmea_l        = true;
+  eeprom_block.field.settings.nmea_s        = true;
+  eeprom_block.field.settings.nmea_out      = NMEA_UART;
+  eeprom_block.field.settings.gdl90         = GDL90_OFF;
+  eeprom_block.field.settings.d1090         = D1090_OFF;
+  eeprom_block.field.settings.json          = JSON_OFF;
+  eeprom_block.field.settings.stealth       = false;
+  eeprom_block.field.settings.no_track      = false;
+  eeprom_block.field.settings.power_save    = POWER_SAVE_NONE;
+
+  RPi_SerialNumber();
+}
+
+static void RPi_loop()
+{
+
+}
+
+static void RPi_fini()
+{
+
+}
+
+static void RPi_reset()
+{
+
 }
 
 static uint32_t RPi_getChipId()
 {
-  return gethostid();
+  return SerialNumber ? SerialNumber : gethostid();
 }
 
 static long RPi_random(long howsmall, long howBig)
@@ -157,12 +256,35 @@ static void RPi_WiFi_transmit_UDP(int port, byte *buf, size_t size)
 
 static void RPi_SPI_begin()
 {
-  /* TBD */
+  SPI.begin();
 }
 
 static void RPi_swSer_begin(unsigned long baud)
 {
   swSer.begin(baud);
+}
+
+static byte RPi_Display_setup()
+{
+  byte rval = DISPLAY_NONE;
+
+  if (EPD_setup()) {
+    rval = DISPLAY_EPD_2_7;
+  }
+
+  return rval;
+}
+
+static void RPi_Display_loop()
+{
+  if (hw_info.display == DISPLAY_EPD_2_7) {
+    EPD_loop();
+  }
+}
+
+static void RPi_Display_fini(const char *msg)
+{
+
 }
 
 void RPi_GNSS_PPS_Interrupt_handler() {
@@ -176,6 +298,8 @@ static unsigned long RPi_get_PPS_TimeMarker() {
 static void RPi_UATSerial_begin(unsigned long baud)
 {
   UATSerial.begin(baud);
+  UATSerial.dtr(false);
+  UATSerial.rts(false);
 }
 
 static void RPi_CC13XX_restart()
@@ -204,10 +328,18 @@ static void RPi_WDT_setup()
   /* TBD */
 }
 
+static void RPi_WDT_fini()
+{
+  /* TBD */
+}
+
 const SoC_ops_t RPi_ops = {
   SOC_RPi,
   "RPi",
   RPi_setup,
+  RPi_loop,
+  RPi_fini,
+  RPi_reset,
   RPi_getChipId,
   NULL,
   NULL,
@@ -216,8 +348,8 @@ const SoC_ops_t RPi_ops = {
   NULL,
   NULL,
   NULL,
-  NULL,
   RPi_WiFi_transmit_UDP,
+  NULL,
   NULL,
   NULL,
   NULL,
@@ -225,8 +357,9 @@ const SoC_ops_t RPi_ops = {
   RPi_swSer_begin,
   NULL,
   NULL,
-  NULL,
-  NULL,
+  RPi_Display_setup,
+  RPi_Display_loop,
+  RPi_Display_fini,
   NULL,
   NULL,
   NULL,
@@ -234,7 +367,8 @@ const SoC_ops_t RPi_ops = {
   NULL,
   RPi_UATSerial_begin,
   RPi_CC13XX_restart,
-  RPi_WDT_setup
+  RPi_WDT_setup,
+  RPi_WDT_fini
 };
 
 static bool inputAvailable()
@@ -419,16 +553,21 @@ void normal_loop()
       Traffic_loop();
     }
 
-    if (isTimeToExport() && isValidFix()) {
+    if (isTimeToExport()) {
       NMEA_Export();
-      GDL90_Export();
-      D1090_Export();
-      JSON_Export();
+
+      if (isValidFix()) {
+        GDL90_Export();
+        D1090_Export();
+        JSON_Export();
+      }
       ExportTimeMarker = millis();
     }
 
     // Handle Air Connect
     NMEA_loop();
+
+    SoC->Display_loop();
 
     ClearExpired();
 }
@@ -448,30 +587,17 @@ void relay_loop()
     for (int i=0; i < MAX_TRACKING_OBJECTS; i++) {
       size_t size = RF_Payload_Size(settings->rf_protocol);
       size = size > sizeof(Container[i].raw) ? sizeof(Container[i].raw) : size;
-      String str = Bin2Hex(Container[i].raw, size);
-      size_t str_len = str.length();
 
-      if (str_len > 0) {
+      if (memcmp (Container[i].raw, EmptyFO.raw, size) != 0) {
         // Raw data
-        char hexdata[2 * MAX_PKT_SIZE + 1];
-
-        str.toCharArray(hexdata, sizeof(hexdata));
-
-        if (str_len > 2 * MAX_PKT_SIZE) {
-          str_len = 2 * MAX_PKT_SIZE;
-        }
-
-        for(int j = 0; j < str_len ; j+=2)
-        {
-          TxBuffer[j>>1] = getVal(hexdata[j+1]) + (getVal(hexdata[j]) << 4);
-        }
-
-        size_t tx_size = str_len / 2;
+        size_t tx_size = sizeof(TxBuffer) > size ? size : sizeof(TxBuffer);
+        memcpy(TxBuffer, Container[i].raw, tx_size);
 
         if (tx_size > 0) {
           /* Follow duty cycle rule */
           if (RF_Transmit(tx_size, true /* false */)) {
 #if 0
+            String str = Bin2Hex(TxBuffer, tx_size);
             printf("%s\n", str.c_str());
 #endif
             Container[i] = EmptyFO;
@@ -627,15 +753,34 @@ int main()
       exit(EXIT_FAILURE);
   }
 
-  Serial.begin(38400);
+  Serial.begin(SERIAL_OUT_BR);
 
   hw_info.soc = SoC_setup(); // Has to be very first procedure in the execution order
+
+  Serial.println();
+  Serial.print(F(SOFTRF_IDENT));
+  Serial.print(SoC->name);
+  Serial.print(F(" FW.REV: " SOFTRF_FIRMWARE_VERSION " DEV.ID: "));
+  Serial.println(String(SoC->getChipId(), HEX));
+  Serial.println(F("Copyright (C) 2015-2020 Linar Yusupov. All rights reserved."));
+  Serial.flush();
 
   hw_info.rf = RF_setup();
 
   if (hw_info.rf == RF_IC_NONE) {
       exit(EXIT_FAILURE);
   }
+
+#if 0
+  Serial.print("Intializing E-ink display module (may take up to 10 seconds)... ");
+  Serial.flush();
+  hw_info.display = SoC->Display_setup();
+  if (hw_info.display != DISPLAY_NONE) {
+    Serial.println(" done.");
+  } else {
+    Serial.println(" failed!");
+  }
+#endif
 
   ThisAircraft.addr = SoC->getChipId() & 0x00FFFFFF;
   ThisAircraft.aircraft_type = settings->aircraft_type;

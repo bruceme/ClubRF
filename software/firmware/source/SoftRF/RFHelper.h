@@ -1,6 +1,6 @@
 /*
  * RFHelper.h
- * Copyright (C) 2016-2019 Linar Yusupov
+ * Copyright (C) 2016-2020 Linar Yusupov
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -54,7 +54,9 @@ enum
   RF_IC_NONE,
   RF_IC_NRF905,
   RF_IC_SX1276,
-  RF_IC_CC13XX
+  RF_IC_CC13XX,
+  RF_IC_S7XG,
+  RF_DRV_OGN
 };
 
 enum
@@ -108,9 +110,22 @@ bool cc13xx_receive(void);
 void cc13xx_transmit(void);
 void cc13xx_shutdown(void);
 
+bool s7xg_probe(void);
+void s7xg_setup(void);
+void s7xg_channel(uint8_t);
+bool s7xg_receive(void);
+void s7xg_transmit(void);
+void s7xg_shutdown(void);
+
+bool ognrf_probe(void);
+void ognrf_setup(void);
+void ognrf_channel(uint8_t);
+bool ognrf_receive(void);
+void ognrf_transmit(void);
+void ognrf_shutdown(void);
+
 extern byte TxBuffer[MAX_PKT_SIZE], RxBuffer[MAX_PKT_SIZE];
 extern unsigned long TxTimeMarker;
-//extern byte TxPkt[MAX_PKT_SIZE];
 
 extern const rfchip_ops_t *rf_chip;
 extern bool RF_SX1276_RST_is_connected;

@@ -1,6 +1,6 @@
 /*
  * Platform_CC13XX.cpp
- * Copyright (C) 2019 Linar Yusupov
+ * Copyright (C) 2019-2020 Linar Yusupov
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -20,6 +20,8 @@
 
 #include "SoCHelper.h"
 #include "RFHelper.h"
+#include "LEDHelper.h"
+#include "SoundHelper.h"
 
 #include <easylink/EasyLink.h>
 
@@ -32,10 +34,29 @@ lmic_pinmap lmic_pins = {
 };
 
 static uint8_t ieeeAddr[8];
+WS2812 strip(PIX_NUM);
+uint8_t LEDs[PIX_NUM][3];
+
+char UDPpacketBuffer[4]; // Dummy definition to satisfy build sequence
 
 static void CC13XX_setup()
 {
   EasyLink_getIeeeAddr(ieeeAddr);
+}
+
+static void CC13XX_loop()
+{
+
+}
+
+static void CC13XX_fini()
+{
+
+}
+
+static void CC13XX_reset()
+{
+
 }
 
 static uint32_t CC13XX_getChipId()
@@ -49,6 +70,28 @@ static long CC13XX_random(long howsmall, long howBig)
   return random(howsmall, howBig);
 }
 
+static void CC13XX_Sound_test(int var)
+{
+  if (settings->volume != BUZZER_OFF) {
+//    swSer.enableRx(false);
+
+#if 0
+    tone(SOC_GPIO_PIN_BUZZER, 440, 500);delay(500);
+    tone(SOC_GPIO_PIN_BUZZER, 640, 500);delay(500);
+    tone(SOC_GPIO_PIN_BUZZER, 840, 500);delay(500);
+    tone(SOC_GPIO_PIN_BUZZER, 1040, 500);
+
+    delay(600);
+#endif
+//    swSer.enableRx(true);
+  }
+}
+
+static void CC13XX_WiFi_setOutputPower(int dB)
+{
+  /* NONE */
+}
+
 static void CC13XX_WiFi_transmit_UDP(int port, byte *buf, size_t size)
 {
   /* NONE */
@@ -56,7 +99,28 @@ static void CC13XX_WiFi_transmit_UDP(int port, byte *buf, size_t size)
 
 static void CC13XX_SPI_begin()
 {
+  SPI.begin();
+}
+
+static void CC13XX_swSer_begin(unsigned long baud)
+{
+  swSer.begin(baud);
+}
+
+static void CC13XX_swSer_enableRx(boolean arg)
+{
+
+}
+
+static void CC13XX_Battery_setup()
+{
+
+}
+
+static float CC13XX_Battery_voltage()
+{
   /* TBD */
+  return 0 ;
 }
 
 void CC13XX_GNSS_PPS_Interrupt_handler() {
@@ -65,6 +129,10 @@ void CC13XX_GNSS_PPS_Interrupt_handler() {
 
 static unsigned long CC13XX_get_PPS_TimeMarker() {
   return PPS_TimeMarker;
+}
+
+static bool CC13XX_Baro_setup() {
+  return true;
 }
 
 static void CC13XX_UATSerial_begin(unsigned long baud)
@@ -82,37 +150,47 @@ static void CC13XX_WDT_setup()
   /* TBD */
 }
 
+static void CC13XX_WDT_fini()
+{
+  /* TBD */
+}
+
 const SoC_ops_t CC13XX_ops = {
   SOC_CC13XX,
   "CC13XX",
   CC13XX_setup,
+  CC13XX_loop,
+  CC13XX_fini,
+  CC13XX_reset,
   CC13XX_getChipId,
   NULL,
   NULL,
   NULL,
   CC13XX_random,
+  CC13XX_Sound_test,
   NULL,
-  NULL,
-  NULL,
-  NULL,
+  CC13XX_WiFi_setOutputPower,
   CC13XX_WiFi_transmit_UDP,
   NULL,
   NULL,
   NULL,
+  NULL,
   CC13XX_SPI_begin,
+  CC13XX_swSer_begin,
+  CC13XX_swSer_enableRx,
   NULL,
   NULL,
   NULL,
   NULL,
-  NULL,
-  NULL,
-  NULL,
-  NULL,
+  CC13XX_Battery_setup,
+  CC13XX_Battery_voltage,
+  CC13XX_GNSS_PPS_Interrupt_handler,
   CC13XX_get_PPS_TimeMarker,
-  NULL,
+  CC13XX_Baro_setup,
   CC13XX_UATSerial_begin,
   CC13XX_restart,
-  CC13XX_WDT_setup
+  CC13XX_WDT_setup,
+  CC13XX_WDT_fini
 };
 
 #endif /* ENERGIA_ARCH_CC13XX */
